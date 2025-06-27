@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Rooms of Roaming – ASCII Explorer</title>
+  <style>
+    body {
+      background: #000;
+      color: #0f0;
+      font-family: monospace;
+      padding: 0;
+      margin: 0;
+      display: flex;
+      height: 100vh;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+    }
+    pre {
+      line-height: 1.1;
+      font-size: 16px;
+    }
+  </style>
+</head>
+<body>
+  <pre id="map"></pre>
+  <script>
+    const CHUNK_SIZE = 48;
+    // Player global tile coordinates
+    let tileX = 8;
+    let tileY = 8;
+
+    function chunkCoords(x, y) {
+      return [Math.floor(x / CHUNK_SIZE), Math.floor(y / CHUNK_SIZE)];
+    }
+
+    async function fetchChunk(cx, cy) {
+      const res = await fetch(`/api/map?x=${cx}&y=${cy}`);
+      return res.json();
+    }
+
+    async function render() {
+      const [cx, cy] = chunkCoords(tileX, tileY);
+      const chunk = await fetchChunk(cx, cy);
+      // Clone chunk lines so we can overlay player
+      const lines = chunk.map((row) => row.split(""));
+      const localX = ((tileX % CHUNK_SIZE) + CHUNK_SIZE) % CHUNK_SIZE;
+      const localY = ((tileY % CHUNK_SIZE) + CHUNK_SIZE) % CHUNK_SIZE;
+      lines[localY][localX] = "@";
+      const ascii = lines.map((row) => row.join(""));
+      document.getElementById("map").textContent = ascii.join("\n");
+    }
+
+    function move(dx, dy) {
+      tileX += dx;
+      tileY += dy;
+      render();
+    }
+
+    document.addEventListener("keydown", (e) => {
+      switch (e.key) {
+        case "ArrowUp":
+        case "w":
+          move(0, -1);
+          break;
+        case "ArrowDown":
+        case "s":
+          move(0, 1);
+          break;
+        case "ArrowLeft":
+        case "a":
+          move(-1, 0);
+          break;
+        case "ArrowRight":
+        case "d":
+          move(1, 0);
+          break;
+        case "i":
+          window.open("/api/readme", "_blank");
+          break;
+      }
+    });
+
+    render();
+  </script>
+</body>
+</html> 

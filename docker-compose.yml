@@ -1,0 +1,63 @@
+services:
+  backend:
+    build: ./backend
+    volumes:
+      - ./backend:/app
+    networks:
+      - localnet
+    command: uvicorn main:app --reload --workers 1 --host 0.0.0.0 --port 8000
+    depends_on:
+      - postgres
+    environment:
+      DATABASE_URL: postgresql+psycopg2://postgres@postgres:5432/roro
+    restart: always
+
+  frontend:
+    build: ./frontend
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    environment:
+      CHOKIDAR_USEPOLLING: "true"
+    stdin_open: true
+    tty: true
+    command: npm run dev
+    networks:
+      - localnet
+    depends_on:
+      - backend
+    restart: always
+
+  nginx:
+    image: nginx:alpine
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    environment:
+      VIRTUAL_HOST: roomsofroaming.janczechowski.com
+      LETSENCRYPT_HOST: roomsofroaming.janczechowski.com
+    networks:
+      - localnet
+    #  - nginx-proxy
+    ports:
+      - 127.0.0.1:3000:80
+    restart: always
+
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_DB: roro
+      POSTGRES_HOST_AUTH_METHOD: trust
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - localnet
+    restart: always
+
+networks:
+  localnet:
+  nginx-proxy:
+    external: true
+
+volumes:
+  postgres_data:

@@ -1,0 +1,24 @@
+html, body {
+  height: 100%;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  background: #000;
+  color: #0f0;
+  font-family: 'Courier New', 'Lucida Console', monospace;
+  overflow: hidden;
+}
+
+#root {
+  height: 100vh;
+  width: 100vw;
+  overflow: hidden;
+}
+
+/* Ensure square characters for the game display */
+pre {
+  font-family: 'Courier New', 'Lucida Console', monospace;
+  font-weight: normal;
+  letter-spacing: 0;
+  word-spacing: 0;
+} 
