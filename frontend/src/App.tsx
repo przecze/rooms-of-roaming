@@ -11,6 +11,24 @@ interface ChunkInfo {
   data: Chunk;
   fetchTime: number; // milliseconds
   fetchedAt: number; // timestamp
+  debug?: {
+    alpha: number;
+    beta: number;
+    spatial_variation: number;
+    generation_time: number;
+    wavelengths: string[];
+    timings: {
+      setup: number;
+      init: number;
+      boundary_corridors: number;
+      room_generation: number;
+      room_floors: number;
+      room_hallways: number;
+      boundary_connections: number;
+      total: number;
+      total_with_overhead: number;
+    };
+  };
 }
 
 function chunkCoords(x: number, y: number): [number, number] {
@@ -21,12 +39,22 @@ function chunkKey(cx: number, cy: number): string {
   return `${cx},${cy}`;
 }
 
-async function fetchChunk(cx: number, cy: number): Promise<{ data: Chunk; fetchTime: number }> {
+async function fetchChunk(cx: number, cy: number, debug: boolean = false): Promise<{ data: Chunk; fetchTime: number; debug?: any }> {
   const startTime = performance.now();
-  const res = await fetch(`/api/map?x=${cx}&y=${cy}`);
-  const data = await res.json();
+  const url = debug ? `/api/map?x=${cx}&y=${cy}&debug=true` : `/api/map?x=${cx}&y=${cy}`;
+  const res = await fetch(url);
+  const response = await res.json();
   const fetchTime = performance.now() - startTime;
-  return { data, fetchTime };
+  
+  if (debug && response.data) {
+    return { 
+      data: response.data, 
+      fetchTime,
+      debug: response.debug
+    };
+  }
+  
+  return { data: response, fetchTime };
 }
 
 function useViewport(): { cols: number; rows: number } {
@@ -101,26 +129,31 @@ const App: React.FC = () => {
         const [cxStr, cyStr] = key.split(',');
         const cx = parseInt(cxStr, 10);
         const cy = parseInt(cyStr, 10);
-        fetchChunk(cx, cy).then(({ data, fetchTime }) => {
+        fetchChunk(cx, cy, debugMode).then(({ data, fetchTime, debug }) => {
           setCache((prev) => ({ 
             ...prev, 
             [key]: { 
               data, 
               fetchTime, 
-              fetchedAt: Date.now() 
+              fetchedAt: Date.now(),
+              debug 
             } 
           }));
         });
       }
     });
-  }, [tileX, tileY, viewport, cache]);
+  }, [tileX, tileY, viewport, cache, debugMode]);
 
   useEffect(() => {
     const handler = (e: KeyboardEvent): void => {
       // Check for Ctrl+D to toggle debug mode
       if (e.ctrlKey && e.key === 'd') {
         e.preventDefault();
-        setDebugMode(prev => !prev);
+        setDebugMode(prev => {
+          // Clear cache when toggling debug mode to refetch with debug info
+          setCache({});
+          return !prev;
+        });
         return;
       }
 
@@ -279,8 +312,8 @@ const App: React.FC = () => {
           fontFamily: "'Courier New', 'Lucida Console', monospace",
           fontWeight: 'normal',
           letterSpacing: 0,
-          transform: 'scaleX(1.67)', // Only keep the square scaling
-          transformOrigin: 'center center', // Center the transform
+          transform: 'scaleX(1.67)',
+          transformOrigin: 'center center',
         }}
       >
         {lines.join('\n')}
@@ -335,27 +368,46 @@ const App: React.FC = () => {
               <div
                 style={{
                   position: 'absolute',
-                  left: screenX + chunkWidth - 60 * 1.67,
+                  left: screenX + chunkWidth - 120 * 1.67, // Increased width for timing data
                   top: screenY + 2,
-                  fontSize: '8px',
+                  fontSize: '12px', // Slightly smaller to fit more timing data
                   color: '#ff0',
-                  backgroundColor: 'rgba(0,0,0,0.9)',
-                  padding: '1px 3px',
-                  borderRadius: '2px',
+                  backgroundColor: 'rgba(0,0,0,0.95)',
+                  padding: '6px 8px',
+                  borderRadius: '4px',
                   lineHeight: 1.1,
                   pointerEvents: 'none',
                   fontFamily: 'monospace',
                   whiteSpace: 'nowrap',
+                  border: '1px solid #ff0',
                 }}
               >
-                <div>{cx},{cy}</div>
+                <div style={{ fontWeight: 'bold' }}>{cx},{cy}</div>
                 {info ? (
                   <>
-                    <div>{info.fetchTime.toFixed(0)}ms</div>
-                    <div>{((Date.now() - info.fetchedAt) / 1000).toFixed(0)}s</div>
+                    <div>Fetch: {info.fetchTime.toFixed(0)}ms</div>
+                    <div>Age: {((Date.now() - info.fetchedAt) / 1000).toFixed(0)}s</div>
+                    {info.debug && (
+                      <>
+                        <div>α:{info.debug.alpha} β:{info.debug.beta}</div>
+                        <div>Var: {info.debug.spatial_variation}</div>
+                        <div style={{ marginTop: '2px', fontSize: '11px' }}>
+                          <div>Setup: {info.debug.timings.setup}ms</div>
+                          <div>Init: {info.debug.timings.init}ms</div>
+                          <div>Bound: {info.debug.timings.boundary_corridors}ms</div>
+                          <div>Rooms: {info.debug.timings.room_generation}ms</div>
+                          <div>Floors: {info.debug.timings.room_floors}ms</div>
+                          <div>Halls: {info.debug.timings.room_hallways}ms</div>
+                          <div>Conn: {info.debug.timings.boundary_connections}ms</div>
+                          <div style={{ fontWeight: 'bold', borderTop: '1px solid #ff0', paddingTop: '1px' }}>
+                            Total: {info.debug.timings.total}ms
+                          </div>
+                        </div>
+                      </>
+                    )}
                   </>
                 ) : (
-                  <div>...</div>
+                  <div>Loading...</div>
                 )}
               </div>
             </div>
@@ -370,9 +422,9 @@ const App: React.FC = () => {
         top: 10,
         left: 10,
         color: '#0f0',
-        fontSize: '12px',
+        fontSize: '14px',
         backgroundColor: 'rgba(0,0,0,0.9)',
-        padding: '8px',
+        padding: '10px',
         borderRadius: '4px',
         border: '1px solid #0f0',
         fontFamily: 'monospace',
@@ -382,6 +434,19 @@ const App: React.FC = () => {
         <div>Player: {tileX}, {tileY}</div>
         <div>Chunks: {chunkInfoMap.size}</div>
         <div>Cached: {Object.keys(cache).length}</div>
+        {/* Show wavelengths from any cached chunk with debug info */}
+        {(() => {
+          const chunkWithDebug = Object.values(cache).find(chunk => chunk.debug?.wavelengths);
+          if (chunkWithDebug?.debug?.wavelengths) {
+            return (
+              <div style={{ marginTop: '4px', fontSize: '12px' }}>
+                <div>Wavelengths:</div>
+                <div>{chunkWithDebug.debug.wavelengths.join(', ')}</div>
+              </div>
+            );
+          }
+          return null;
+        })()}
       </div>
     </div>
   );
