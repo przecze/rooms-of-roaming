@@ -22,7 +22,6 @@ api_router = APIRouter(prefix="/api")
 CHUNK_SIZE = 48  # 48x48 grid per chunk - better for room generation
 WALL_CHAR = "#"
 FLOOR_CHAR = " "
-DOOR_CHAR = " "
 
 
 @dataclass
@@ -125,7 +124,6 @@ class DungeonGenerator:
         self._create_room_floors()
         self._connect_rooms_with_hallways()
         self._connect_to_boundary_points()
-        self._add_doors()
         return ["".join(row) for row in self.grid]
     
     def _create_boundary_corridors(self):
@@ -207,7 +205,7 @@ class DungeonGenerator:
                              key=lambda room: abs(room.center[0] - bx) + abs(room.center[1] - by))
             
             # Create a connection from boundary point to closest room
-            self._create_hallway((bx, by), closest_room.center)
+            self._create_hallway(closest_room.center, (bx, by))
 
     def _force_generate_rooms(self, count: int):
         """Force generate rooms in remaining space."""
@@ -287,52 +285,6 @@ class DungeonGenerator:
         for y in range(y1, y2 + 1):
             if 0 <= x < self.width and 0 <= y < self.height:
                 self.grid[y][x] = FLOOR_CHAR
-    
-    def _add_doors(self):
-        """Add doors at room entrances where hallways meet rooms."""
-        for room in self.rooms:
-            # Check the perimeter of each room for potential door locations
-            perimeter_positions = []
-            
-            # Top and bottom walls
-            for x in range(room.x, room.x + room.width):
-                # Top wall
-                if room.y > 0:
-                    perimeter_positions.append((x, room.y - 1))
-                # Bottom wall
-                if room.y + room.height < self.height:
-                    perimeter_positions.append((x, room.y + room.height))
-            
-            # Left and right walls
-            for y in range(room.y, room.y + room.height):
-                # Left wall
-                if room.x > 0:
-                    perimeter_positions.append((room.x - 1, y))
-                # Right wall
-                if room.x + room.width < self.width:
-                    perimeter_positions.append((room.x + room.width, y))
-            
-            # Place doors where hallways meet room walls
-            for x, y in perimeter_positions:
-                if (0 <= x < self.width and 0 <= y < self.height and 
-                    self.grid[y][x] == FLOOR_CHAR):
-                    
-                    # Check if this is a good door location (not in a corner)
-                    if self._is_good_door_location(x, y, room):
-                        self.grid[y][x] = DOOR_CHAR
-    
-    def _is_good_door_location(self, x: int, y: int, room: Room) -> bool:
-        """Check if a position is a good location for a door."""
-        # Avoid placing doors in corners or too close to other doors
-        door_count = 0
-        for dx in [-1, 0, 1]:
-            for dy in [-1, 0, 1]:
-                nx, ny = x + dx, y + dy
-                if (0 <= nx < self.width and 0 <= ny < self.height and
-                    self.grid[ny][nx] == DOOR_CHAR):
-                    door_count += 1
-        
-        return door_count == 0  # Only place door if no other doors nearby
 
 
 def _seed_from_coords(x: int, y: int) -> int:
