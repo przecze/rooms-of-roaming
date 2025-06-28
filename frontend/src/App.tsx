@@ -168,8 +168,16 @@ const App: React.FC = () => {
   // Keyboard controls (only active when not in landing mode)
   useEffect(() => {
     const handler = (e: KeyboardEvent): void => {
-      if (showLanding) return; // Disable controls in landing mode
+      if (showLanding) {
+        // Landing page controls
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          setShowLanding(false);
+        }
+        return;
+      }
 
+      // Game controls (only active when not in landing mode)
       if (e.ctrlKey && e.key === 'd') {
         e.preventDefault();
         setDebugMode(prev => {
