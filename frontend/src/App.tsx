@@ -5,6 +5,7 @@ import Dialog from './components/Dialog';
 const CHUNK_SIZE = 48;
 const FONT_SIZE_PX = 24; // Back to working size
 const CHAR_WIDTH_PX = Math.floor(FONT_SIZE_PX * 0.6); // Back to working calculation
+const MOVEMENT_DELAY = 300; // 300ms delay between moves
 
 type Chunk = string[]; // 48 lines of 48 chars
 
@@ -32,6 +33,22 @@ interface ChunkInfo {
   };
 }
 
+interface PlayerSession {
+  session_id: string;
+  current_x: number;
+  current_y: number;
+  chalk_points: number;
+  max_distance_reached: number;
+}
+
+interface Tablet {
+  id: number;
+  local_x: number;
+  local_y: number;
+  content: string;
+  last_updated?: string;
+}
+
 function chunkCoords(x: number, y: number): [number, number] {
   return [Math.floor(x / CHUNK_SIZE), Math.floor(y / CHUNK_SIZE)];
 }
@@ -56,6 +73,49 @@ async function fetchChunk(cx: number, cy: number, debug: boolean = false): Promi
   }
   
   return { data: response, fetchTime };
+}
+
+async function createSession(): Promise<PlayerSession | null> {
+  try {
+    const res = await fetch('/api/session', { method: 'POST' });
+    const data = await res.json();
+    return data.session_id ? data : null;
+  } catch (error) {
+    console.warn('Failed to create session:', error);
+    return null;
+  }
+}
+
+async function updatePlayerPosition(sessionId: string, x: number, y: number): Promise<PlayerSession | null> {
+  try {
+    const res = await fetch(`/api/session/${sessionId}/move?x=${x}&y=${y}`, { method: 'POST' });
+    const data = await res.json();
+    return data.session_id ? data : null;
+  } catch (error) {
+    console.warn('Failed to update position:', error);
+    return null;
+  }
+}
+
+async function getChunkTablets(chunkX: number, chunkY: number): Promise<Tablet[]> {
+  try {
+    const res = await fetch(`/api/tablet/${chunkX}/${chunkY}`);
+    const data = await res.json();
+    return data.tablets || [];
+  } catch (error) {
+    console.warn('Failed to fetch tablets:', error);
+    return [];
+  }
+}
+
+async function writeToTablet(tabletId: number, content: string, sessionId: string): Promise<boolean> {
+  try {
+    const res = await fetch(`/api/tablet/${tabletId}/write?content=${encodeURIComponent(content)}&session_id=${sessionId}`, { method: 'POST' });
+    return res.ok;
+  } catch (error) {
+    console.warn('Failed to write to tablet:', error);
+    return false;
+  }
 }
 
 function useViewport(): { cols: number; rows: number } {
@@ -106,9 +166,110 @@ const App: React.FC = () => {
   const [debugMode, setDebugMode] = useState(false);
   const [showLanding, setShowLanding] = useState(true);
   const [animationOffset, setAnimationOffset] = useState({ x: 0, y: 0 });
+  const [session, setSession] = useState<PlayerSession | null>(null);
+  const [showTabletDialog, setShowTabletDialog] = useState(false);
+  const [currentTablet, setCurrentTablet] = useState<Tablet | null>(null);
+  const [tabletContent, setTabletContent] = useState('');
+  const [canMove, setCanMove] = useState(true);
+  const [tablets, setTablets] = useState<Map<string, Tablet[]>>(new Map());
   const viewport = useViewport();
 
   const [cache, setCache] = useState<ChunkCache>({});
+  const lastMoveTime = useRef<number>(0);
+
+  // Create session when app starts
+  useEffect(() => {
+    createSession().then(sessionData => {
+      if (sessionData && sessionData.session_id) {
+        setSession(sessionData);
+      }
+    });
+  }, []);
+
+  // Movement with delay and API calls
+  const movePlayer = useCallback((newX: number, newY: number) => {
+    const now = Date.now();
+    
+    // Skip delay in debug mode
+    if (!debugMode && (now - lastMoveTime.current < MOVEMENT_DELAY || !canMove)) {
+      return; // Ignore rapid movements
+    }
+    
+    lastMoveTime.current = now;
+    setCanMove(false);
+    
+    setTileX(newX);
+    setTileY(newY);
+    
+    // Update server with new position
+    if (session?.session_id) {
+      updatePlayerPosition(session.session_id, newX, newY).then(updatedSession => {
+        if (updatedSession) {
+          setSession(updatedSession);
+        }
+      });
+    }
+    
+    // Re-enable movement after delay (or immediately in debug mode)
+    setTimeout(() => setCanMove(true), debugMode ? 50 : MOVEMENT_DELAY);
+  }, [session, canMove, debugMode]);
+
+  // Check for tablet at current position
+  useEffect(() => {
+    if (showLanding) return;
+    
+    const [chunkX, chunkY] = chunkCoords(tileX, tileY);
+    const localX = ((tileX % CHUNK_SIZE) + CHUNK_SIZE) % CHUNK_SIZE;
+    const localY = ((tileY % CHUNK_SIZE) + CHUNK_SIZE) % CHUNK_SIZE;
+    
+    const chunkKey = `${chunkX},${chunkY}`;
+    const chunkTablets = tablets.get(chunkKey) || [];
+    
+    // Debug logging
+    if (debugMode) {
+      console.log(`Player at (${tileX}, ${tileY}) -> chunk (${chunkX}, ${chunkY}) local (${localX}, ${localY})`);
+      console.log(`Tablets in chunk:`, chunkTablets);
+    }
+    
+    const tabletAtPosition = chunkTablets.find((t: Tablet) => t.local_x === localX && t.local_y === localY);
+    
+    if (tabletAtPosition && !showTabletDialog) {
+      console.log('Found tablet at position:', tabletAtPosition);
+      setCurrentTablet(tabletAtPosition);
+      setTabletContent(tabletAtPosition.content);
+      setShowTabletDialog(true);
+    }
+  }, [tileX, tileY, tablets, showTabletDialog, showLanding, debugMode]);
+
+  // Load tablets for visible chunks
+  useEffect(() => {
+    if (showLanding) return;
+    
+    const halfCols = Math.floor(viewport.cols / 2);
+    const halfRows = Math.floor(viewport.rows / 2);
+    const visibleChunks = new Set<string>();
+
+    for (let y = -halfRows; y <= halfRows; y++) {
+      for (let x = -halfCols; x <= halfCols; x++) {
+        const globalX = tileX + x;
+        const globalY = tileY + y;
+        const [cx, cy] = chunkCoords(globalX, globalY);
+        visibleChunks.add(`${cx},${cy}`);
+      }
+    }
+
+    visibleChunks.forEach(key => {
+      if (!tablets.has(key)) {
+        const [cx, cy] = key.split(',').map(Number);
+        getChunkTablets(cx, cy).then(chunkTablets => {
+          if (debugMode) {
+            console.log(`Loaded ${chunkTablets.length} tablets for chunk ${key}:`, chunkTablets);
+          }
+          setTablets((prev: Map<string, Tablet[]>) => new Map(prev).set(key, chunkTablets));
+        });
+      }
+    });
+  }, [tileX, tileY, viewport, tablets, showLanding, debugMode]);
 
   // Floating animation for landing page
   useEffect(() => {
@@ -182,6 +343,7 @@ const App: React.FC = () => {
         e.preventDefault();
         setDebugMode(prev => {
           setCache({});
+          setTablets(new Map()); // Clear tablet cache too
           return !prev;
         });
         return;
@@ -190,28 +352,60 @@ const App: React.FC = () => {
       switch (e.key) {
         case 'ArrowUp':
         case 'w':
-          setTileY((y) => y - 1);
+          movePlayer(tileX, tileY - 1);
           break;
         case 'ArrowDown':
         case 's':
-          setTileY((y) => y + 1);
+          movePlayer(tileX, tileY + 1);
           break;
         case 'ArrowLeft':
         case 'a':
-          setTileX((x) => x - 1);
+          movePlayer(tileX - 1, tileY);
           break;
         case 'ArrowRight':
         case 'd':
-          setTileX((x) => x + 1);
+          movePlayer(tileX + 1, tileY);
           break;
         case 'i':
           window.open('/api/readme', '_blank');
+          break;
+        case 'Escape':
+          if (showTabletDialog) {
+            setShowTabletDialog(false);
+            setCurrentTablet(null);
+          }
+          break;
+        case 't':
+          // Manual tablet detection for testing
+          if (debugMode) {
+            const [chunkX, chunkY] = chunkCoords(tileX, tileY);
+            const localX = ((tileX % CHUNK_SIZE) + CHUNK_SIZE) % CHUNK_SIZE;
+            const localY = ((tileY % CHUNK_SIZE) + CHUNK_SIZE) % CHUNK_SIZE;
+            const chunkKey = `${chunkX},${chunkY}`;
+            const chunkTablets = tablets.get(chunkKey) || [];
+            
+            console.log('Manual tablet check:');
+            console.log(`Position: (${tileX}, ${tileY})`);
+            console.log(`Chunk: (${chunkX}, ${chunkY})`);
+            console.log(`Local: (${localX}, ${localY})`);
+            console.log(`Tablets in chunk:`, chunkTablets);
+            
+            const tabletAtPosition = chunkTablets.find((t: Tablet) => t.local_x === localX && t.local_y === localY);
+            if (tabletAtPosition) {
+              console.log('Found tablet:', tabletAtPosition);
+              setCurrentTablet(tabletAtPosition);
+              setTabletContent(tabletAtPosition.content);
+              setShowTabletDialog(true);
+            } else {
+              console.log('No tablet at this position');
+            }
+          }
           break;
       }
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [showLanding]);
+  }, [showLanding, movePlayer, tileX, tileY, showTabletDialog]);
 
   // Build maze view (shared between landing and game)
   const buildMazeView = () => {
@@ -469,8 +663,8 @@ const App: React.FC = () => {
         </button>
       </Dialog>
 
-      {/* Normal game mode help text */}
-      {!showLanding && !debugMode && (
+      {/* Game mode HUD */}
+      {!showLanding && (
         <div style={{
           position: 'fixed',
           top: 10,
@@ -478,12 +672,164 @@ const App: React.FC = () => {
           color: '#0f0',
           fontSize: '12px',
           backgroundColor: 'rgba(0,0,0,0.7)',
-          padding: '5px',
+          padding: '8px',
           borderRadius: '3px',
+          fontFamily: "'Courier New', 'Lucida Console', monospace",
         }}>
-          Press Ctrl+D for debug mode
+          {session && (
+            <div style={{ marginBottom: '4px', fontSize: '14px', fontWeight: 'bold' }}>
+              ◊ Chalk Points: {session.chalk_points}
+            </div>
+          )}
+          <div>Press Ctrl+D for debug mode</div>
+          <div>Step on ◊ to interact with tablets</div>
+          {debugMode && (
+            <div style={{ marginTop: '4px', color: '#ff0' }}>
+              DEBUG: Fast movement enabled<br/>
+              Position: ({tileX}, {tileY})<br/>
+              Press 't' to manually check tablet
+            </div>
+          )}
         </div>
       )}
+
+      {/* Tablet Dialog */}
+      <Dialog isOpen={showTabletDialog} onClose={() => {
+        setShowTabletDialog(false);
+        setCurrentTablet(null);
+      }}>
+        {currentTablet && (
+          <div style={{
+            maxWidth: '600px',
+            color: '#0f0',
+            fontFamily: "'Courier New', 'Lucida Console', monospace",
+          }}>
+            <div style={{
+              fontSize: '1.5rem',
+              fontWeight: 'bold',
+              marginBottom: '1rem',
+              textAlign: 'center',
+              textShadow: '0 0 10px #0f0',
+            }}>
+              ◊ STONE TABLET ◊
+            </div>
+            
+            <div style={{
+              border: '1px solid #0f0',
+              padding: '1rem',
+              marginBottom: '1rem',
+              backgroundColor: 'rgba(0,15,0,0.1)',
+              minHeight: '200px',
+              whiteSpace: 'pre-wrap',
+              fontFamily: 'monospace',
+              fontSize: '14px',
+              lineHeight: '1.4',
+            }}>
+              {currentTablet.content || '[ Empty tablet - be the first to write something ]'}
+            </div>
+
+            <div style={{ marginBottom: '1rem' }}>
+              <label style={{ display: 'block', marginBottom: '0.5rem' }}>
+                Add your message (costs 1 chalk point per character):
+              </label>
+              <textarea
+                value={tabletContent}
+                onChange={(e) => setTabletContent(e.target.value)}
+                style={{
+                  width: '100%',
+                  height: '100px',
+                  backgroundColor: 'rgba(0,0,0,0.8)',
+                  border: '1px solid #0f0',
+                  color: '#0f0',
+                  fontFamily: 'monospace',
+                  fontSize: '14px',
+                  padding: '8px',
+                  resize: 'vertical',
+                }}
+                placeholder="Write your message here..."
+              />
+              <div style={{ 
+                fontSize: '12px', 
+                marginTop: '0.5rem',
+                color: session && session.chalk_points >= (tabletContent.length - currentTablet.content.length) ? '#0f0' : '#f00'
+              }}>
+                Characters to add: {Math.max(0, tabletContent.length - currentTablet.content.length)} | 
+                Chalk needed: {Math.max(0, tabletContent.length - currentTablet.content.length)} | 
+                You have: {session?.chalk_points || 0}
+              </div>
+            </div>
+
+            <div style={{ display: 'flex', gap: '1rem', justifyContent: 'center' }}>
+              <button
+                onClick={async () => {
+                  if (!session?.session_id || !currentTablet) return;
+                  
+                  const newContent = tabletContent.slice(currentTablet.content.length);
+                  if (newContent.length === 0) {
+                    setShowTabletDialog(false);
+                    setCurrentTablet(null);
+                    return;
+                  }
+                  
+                  const success = await writeToTablet(currentTablet.id, newContent, session.session_id);
+                  if (success) {
+                    // Update the current tablet content
+                    setCurrentTablet({...currentTablet, content: tabletContent});
+                    // Refresh tablets cache
+                    const [chunkX, chunkY] = chunkCoords(tileX, tileY);
+                    const chunkKey = `${chunkX},${chunkY}`;
+                    const updatedTablets = await getChunkTablets(chunkX, chunkY);
+                    setTablets(prev => new Map(prev).set(chunkKey, updatedTablets));
+                    // Update session (chalk points should be updated by the API)
+                    if (session.session_id) {
+                      updatePlayerPosition(session.session_id, tileX, tileY).then(updatedSession => {
+                        if (updatedSession) {
+                          setSession(updatedSession);
+                        }
+                      });
+                    }
+                    setShowTabletDialog(false);
+                    setCurrentTablet(null);
+                  } else {
+                    alert('Failed to write to tablet. Check your chalk points.');
+                  }
+                }}
+                disabled={!session || (tabletContent.length - currentTablet.content.length) > (session.chalk_points || 0) || tabletContent.length <= currentTablet.content.length}
+                style={{
+                  padding: '0.75rem 1.5rem',
+                  backgroundColor: 'transparent',
+                  border: '2px solid #0f0',
+                  color: '#0f0',
+                  fontFamily: "'Courier New', 'Lucida Console', monospace",
+                  cursor: 'pointer',
+                  fontSize: '14px',
+                  opacity: (!session || (tabletContent.length - currentTablet.content.length) > (session.chalk_points || 0) || tabletContent.length <= currentTablet.content.length) ? 0.5 : 1,
+                }}
+              >
+                Write to Tablet
+              </button>
+              
+              <button
+                onClick={() => {
+                  setShowTabletDialog(false);
+                  setCurrentTablet(null);
+                }}
+                style={{
+                  padding: '0.75rem 1.5rem',
+                  backgroundColor: 'transparent',
+                  border: '2px solid #0f0',
+                  color: '#0f0',
+                  fontFamily: "'Courier New', 'Lucida Console', monospace",
+                  cursor: 'pointer',
+                  fontSize: '14px',
+                }}
+              >
+                Close (ESC)
+              </button>
+            </div>
+          </div>
+        )}
+      </Dialog>
     </div>
   );
 };

@@ -10,8 +10,21 @@ from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.responses import PlainTextResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi import APIRouter
+from sqlalchemy.orm import Session
+import math
+import uuid
+from sqlalchemy import func
 
-from database import get_db  # noqa: F401 — imported for future use
+try:
+    from database import get_db as real_get_db, Base, engine
+    from models import StoneTablet, PlayerSession
+    DATABASE_AVAILABLE = True
+    get_db = real_get_db
+except Exception as e:
+    print(f"Database not available: {e}")
+    DATABASE_AVAILABLE = False
+    def get_db():
+        yield None
 
 app = FastAPI(title="Rooms of Roaming API", version="0.1.0")
 
@@ -24,6 +37,7 @@ api_router = APIRouter(prefix="/api")
 CHUNK_SIZE = 48  # 48x48 grid per chunk - better for room generation
 WALL_CHAR = "#"
 FLOOR_CHAR = " "
+TABLET_CHAR = "◊"
 
 # Boundary corridor configuration
 ADDITIONAL_CORRIDOR_PROBABILITY = 0.15  # 15% chance for extra corridors
@@ -279,9 +293,13 @@ class DungeonGenerator:
         self._connect_to_boundary_points()
         self.timings['boundary_connections'] = time.time() - t5
         
+        t6 = time.time()
+        tablet_positions = self._place_stone_tablets()
+        self.timings['tablet_placement'] = time.time() - t6
+        
         self.timings['total'] = time.time() - start_time
         
-        return ["".join(row) for row in self.grid], self.timings
+        return ["".join(row) for row in self.grid], self.timings, tablet_positions
     
     def _create_boundary_corridors(self):
         """Create corridor openings at required boundary points."""
@@ -501,6 +519,89 @@ class DungeonGenerator:
         for y in range(y1, y2 + 1):
             if 0 <= x < self.width and 0 <= y < self.height:
                 self.grid[y][x] = FLOOR_CHAR
+    
+    def _place_stone_tablets(self) -> List[Tuple[int, int]]:
+        """Place 0-2 stone tablets in appropriate locations within the chunk."""
+        tablet_positions = []
+        
+        # Special case: Add test tablet near spawn for testing
+        if self.chunk_x == 0 and self.chunk_y == 0:
+            # Place test tablet at local position (9, 8) which is global (9, 8) - one tile east of spawn
+            test_x, test_y = 9, 8
+            if (0 <= test_x < self.width and 0 <= test_y < self.height and 
+                self.grid[test_y][test_x] == FLOOR_CHAR):
+                self.grid[test_y][test_x] = TABLET_CHAR
+                tablet_positions.append((test_x, test_y))
+                print(f"DEBUG: Placed test tablet at local ({test_x}, {test_y}) in chunk ({self.chunk_x}, {self.chunk_y})")
+            else:
+                # Force place it by carving out the space if needed
+                if 0 <= test_x < self.width and 0 <= test_y < self.height:
+                    self.grid[test_y][test_x] = TABLET_CHAR
+                    tablet_positions.append((test_x, test_y))
+                    print(f"DEBUG: Force-placed test tablet at local ({test_x}, {test_y}) in chunk ({self.chunk_x}, {self.chunk_y})")
+        
+        # Deterministic tablet count based on chunk coordinates
+        tablet_seed = _seed_from_coords(self.chunk_x + 1000, self.chunk_y + 1000)
+        tablet_rng = random.Random(tablet_seed)
+        
+        # 40% no tablets, 45% one tablet, 15% two tablets
+        num_tablets = tablet_rng.choices([0, 1, 2], weights=[40, 45, 15])[0]
+        
+        if num_tablets == 0:
+            return tablet_positions
+        
+        # Find potential locations: room centers and corridor intersections
+        potential_locations = []
+        
+        # Add room centers
+        for room in self.rooms:
+            center_x, center_y = room.center
+            if self._is_valid_tablet_location(center_x, center_y):
+                potential_locations.append((center_x, center_y))
+        
+        # Add corridor intersections (where hallways cross)
+        for y in range(2, self.height - 2):
+            for x in range(2, self.width - 2):
+                if (self.grid[y][x] == FLOOR_CHAR and 
+                    self._count_floor_neighbors(x, y) >= 3 and
+                    self._is_valid_tablet_location(x, y)):
+                    potential_locations.append((x, y))
+        
+        # Select random locations for tablets
+        if potential_locations:
+            tablet_rng.shuffle(potential_locations)
+            for i in range(min(num_tablets, len(potential_locations))):
+                x, y = potential_locations[i]
+                tablet_positions.append((x, y))
+                # Place tablet character on the grid
+                self.grid[y][x] = TABLET_CHAR
+        
+        return tablet_positions
+    
+    def _is_valid_tablet_location(self, x: int, y: int) -> bool:
+        """Check if location is suitable for a tablet."""
+        # Must be floor tile
+        if self.grid[y][x] != FLOOR_CHAR:
+            return False
+        
+        # Must have clear access (not blocking a narrow corridor)
+        neighbors = self._count_floor_neighbors(x, y)
+        return neighbors >= 2  # At least 2 floor neighbors for access
+    
+    def _count_floor_neighbors(self, x: int, y: int) -> int:
+        """Count floor neighbors (including diagonals)."""
+        count = 0
+        for dy in [-1, 0, 1]:
+            for dx in [-1, 0, 1]:
+                if dx == 0 and dy == 0:
+                    continue
+                nx, ny = x + dx, y + dy
+                if (0 <= nx < self.width and 0 <= ny < self.height and 
+                    self.grid[ny][nx] == FLOOR_CHAR):
+                    count += 1
+        return count
+    
+
 
 
 def _seed_from_coords(x: int, y: int) -> int:
@@ -508,7 +609,7 @@ def _seed_from_coords(x: int, y: int) -> int:
     return (x * 73856093) ^ (y * 19349663)
 
 
-def generate_chunk(x: int, y: int) -> Tuple[List[str], dict]:
+def generate_chunk(x: int, y: int, db: Session = None) -> Tuple[List[str], dict]:
     """Generate a dungeon chunk with boundary constraints for seamless connectivity."""
     start_time = time.time()
     
@@ -521,7 +622,29 @@ def generate_chunk(x: int, y: int) -> Tuple[List[str], dict]:
     generator = DungeonGenerator(CHUNK_SIZE, CHUNK_SIZE, seed, boundary_constraints, x, y)
     init_time = time.time() - t2
     
-    chunk_data, generation_timings = generator.generate()
+    chunk_data, generation_timings, tablet_positions = generator.generate()
+    
+    # Create stone tablets in the database if provided and available
+    if DATABASE_AVAILABLE and db and tablet_positions:
+        try:
+            for local_x, local_y in tablet_positions:
+                # Check if tablet already exists at this location
+                existing_tablet = db.query(StoneTablet).filter_by(
+                    chunk_x=x, chunk_y=y, local_x=local_x, local_y=local_y
+                ).first()
+                
+                if not existing_tablet:
+                    tablet = StoneTablet(
+                        chunk_x=x,
+                        chunk_y=y,
+                        local_x=local_x,
+                        local_y=local_y,
+                        content=""
+                    )
+                    db.add(tablet)
+            db.commit()
+        except Exception as e:
+            print(f"Failed to save tablets to database: {e}")
     
     # Combine all timing data
     timings = {
@@ -539,13 +662,14 @@ async def get_map_chunk(
     x: int = Query(0, description="Chunk X coordinate"),
     y: int = Query(0, description="Chunk Y coordinate"),
     debug: bool = Query(False, description="Include debug information"),
+    db: Session = Depends(get_db) if DATABASE_AVAILABLE else None
 ):
     """Return procedurally generated dungeon chunk at given coordinates."""
     if abs(x) > 1_000_000 or abs(y) > 1_000_000:
         raise HTTPException(status_code=400, detail="Invalid chunk coordinates")
     
     start_time = time.time()
-    chunk_data, timings = generate_chunk(x, y)
+    chunk_data, timings = generate_chunk(x, y, db if DATABASE_AVAILABLE else None)
     end_time = time.time()
     
     if debug:
@@ -578,6 +702,87 @@ async def get_readme() -> str:
     if not readme_path.exists():
         raise HTTPException(status_code=404, detail="README not found")
     return readme_path.read_text(encoding="utf-8")
+
+
+# Player Session Endpoints and Stone Tablet Endpoints
+
+@api_router.post("/session")
+async def create_session():
+    """Create a new player session."""
+    import uuid
+    return {"session_id": str(uuid.uuid4()), "chalk_points": 100}
+
+@api_router.get("/session/{session_id}")
+async def get_session(session_id: str):
+    """Get player session data including chalk points."""
+    return {
+        "session_id": session_id,
+        "current_x": 8,
+        "current_y": 8,
+        "chalk_points": 100,
+        "max_distance_reached": 0
+    }
+
+@api_router.post("/session/{session_id}/move")
+async def update_position(
+    session_id: str, 
+    x: int = Query(..., description="New X position"),
+    y: int = Query(..., description="New Y position")
+):
+    """Update player position and award chalk points for exploration."""
+    import math
+    distance = math.sqrt((x - 8) ** 2 + (y - 8) ** 2)
+    chalk_points = 100 + int(math.sqrt(distance) * 10)
+    return {
+        "session_id": session_id,
+        "current_x": x,
+        "current_y": y,
+        "chalk_points": chalk_points,
+        "max_distance_reached": distance
+    }
+
+@api_router.get("/tablet/{chunk_x}/{chunk_y}")
+async def get_chunk_tablets(chunk_x: int, chunk_y: int):
+    """Get all tablets in a chunk with their content."""
+    # For testing, return a dummy tablet at (9, 8) in chunk (0, 0)
+    if chunk_x == 0 and chunk_y == 0:
+        return {
+            "tablets": [{
+                "id": 1,
+                "local_x": 9,
+                "local_y": 8,
+                "content": "This is a test tablet! Step on it to open the dialog.",
+                "last_updated": None
+            }]
+        }
+    return {"tablets": []}
+
+@api_router.get("/tablet/{tablet_id}")
+async def get_tablet(tablet_id: int):
+    """Get a specific tablet's content."""
+    return {
+        "id": tablet_id,
+        "chunk_x": 0,
+        "chunk_y": 0,
+        "local_x": 9,
+        "local_y": 8,
+        "content": "This is a test tablet! Step on it to open the dialog.",
+        "last_updated": None
+    }
+
+@api_router.post("/tablet/{tablet_id}/write")
+async def write_to_tablet(
+    tablet_id: int,
+    content: str = Query(..., description="Content to append to tablet"),
+    session_id: str = Query(..., description="Player session ID")
+):
+    """Add content to a stone tablet using chalk points."""
+    # For testing, just return success
+    return {
+        "tablet_id": tablet_id,
+        "content": f"This is a test tablet! Step on it to open the dialog.{content}",
+        "chalk_points_remaining": 90
+    }
 
 
 # Root route serves the frontend

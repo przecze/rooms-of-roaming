@@ -37,7 +37,7 @@ services:
       LETSENCRYPT_HOST: roomsofroaming.janczechowski.com
     networks:
       - localnet
-    #  - nginx-proxy
+      - nginx-proxy
     ports:
       - 127.0.0.1:3000:80
     restart: always

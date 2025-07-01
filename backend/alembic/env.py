@@ -1,9 +1,7 @@
 import os
-import asyncio
 from logging.config import fileConfig
-from sqlalchemy import pool
+from sqlalchemy import pool, create_engine
 from sqlalchemy.engine import Connection
-from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from alembic import context
 
 # Alembic Config object
@@ -13,14 +11,17 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# Import models for autogenerate (none yet)
-# from database import Base  # noqa: F401
+# Import models for autogenerate
+import sys
+sys.path.append("/app")
+from models import StoneTablet, PlayerSession  # noqa: F401
+from database import Base
 
-target_metadata = None  # We don't have tables yet
+target_metadata = Base.metadata
 
 
 def get_database_url() -> str:
-    return os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./roro.db")
+    return os.getenv("DATABASE_URL", "sqlite:///./roro.db")
 
 
 def run_migrations_offline() -> None:
@@ -47,13 +48,10 @@ def do_run_migrations(connection: Connection) -> None:
 def run_migrations_online() -> None:
     """Run migrations in 'online' mode."""
 
-    connectable: AsyncEngine = create_async_engine(get_database_url(), poolclass=pool.NullPool)
+    connectable = create_engine(get_database_url(), poolclass=pool.NullPool)
 
-    async def async_migrations():
-        async with connectable.connect() as connection:
-            await connection.run_sync(do_run_migrations)
-
-    asyncio.run(async_migrations())
+    with connectable.connect() as connection:
+        do_run_migrations(connection)
 
 
 if context.is_offline_mode():
