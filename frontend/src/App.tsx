@@ -176,9 +176,9 @@ const App: React.FC = () => {
 
   const [cache, setCache] = useState<ChunkCache>({});
   const lastMoveTime = useRef<number>(0);
-  const [tabletCooldown, setTabletCooldown] = useState<Set<string>>(new Set()); // Track recently closed tablets
   const [showConfirmDialog, setShowConfirmDialog] = useState(false);
   const [confirmText, setConfirmText] = useState('');
+  const previousPosition = useRef<{x: number, y: number}>({x: 8, y: 8}); // Track previous position
 
   // Create session when app starts
   useEffect(() => {
@@ -252,20 +252,8 @@ const App: React.FC = () => {
     }
   };
 
-  // Close tablet dialog with cooldown
+  // Close tablet dialog
   const closeTabletDialog = () => {
-    if (currentTablet) {
-      const tabletKey = `${currentTablet.id}-${tileX}-${tileY}`;
-      setTabletCooldown(prev => new Set(prev).add(tabletKey));
-      // Remove from cooldown after 2 seconds
-      setTimeout(() => {
-        setTabletCooldown(prev => {
-          const newSet = new Set(prev);
-          newSet.delete(tabletKey);
-          return newSet;
-        });
-      }, 2000);
-    }
     setShowTabletDialog(false);
     setCurrentTablet(null);
     setTabletContent('');
@@ -273,9 +261,17 @@ const App: React.FC = () => {
     setConfirmText('');
   };
 
-  // Check for tablet at current position
+  // Check for tablet when player moves to new position
   useEffect(() => {
     if (showLanding) return;
+    
+    // Only check for tablets if position actually changed
+    if (previousPosition.current.x === tileX && previousPosition.current.y === tileY) {
+      return;
+    }
+    
+    // Update previous position
+    previousPosition.current = {x: tileX, y: tileY};
     
     const [chunkX, chunkY] = chunkCoords(tileX, tileY);
     const localX = ((tileX % CHUNK_SIZE) + CHUNK_SIZE) % CHUNK_SIZE;
@@ -286,24 +282,20 @@ const App: React.FC = () => {
     
     // Debug logging
     if (debugMode) {
-      console.log(`Player at (${tileX}, ${tileY}) -> chunk (${chunkX}, ${chunkY}) local (${localX}, ${localY})`);
+      console.log(`Player moved to (${tileX}, ${tileY}) -> chunk (${chunkX}, ${chunkY}) local (${localX}, ${localY})`);
       console.log(`Tablets in chunk:`, chunkTablets);
     }
     
     const tabletAtPosition = chunkTablets.find((t: Tablet) => t.local_x === localX && t.local_y === localY);
     
     if (tabletAtPosition && !showTabletDialog) {
-      const tabletKey = `${tabletAtPosition.id}-${tileX}-${tileY}`;
-      // Check if tablet is on cooldown
-      if (!tabletCooldown.has(tabletKey)) {
-        console.log('Found tablet at position:', tabletAtPosition);
-        setCurrentTablet(tabletAtPosition);
-        // Initialize content with existing tablet content
-        setTabletContent(tabletAtPosition.content || '');
-        setShowTabletDialog(true);
-      }
+      console.log('Found tablet at position:', tabletAtPosition);
+      setCurrentTablet(tabletAtPosition);
+      // Initialize content with existing tablet content
+      setTabletContent(tabletAtPosition.content || '');
+      setShowTabletDialog(true);
     }
-  }, [tileX, tileY, tablets, showTabletDialog, showLanding, debugMode, tabletCooldown]);
+  }, [tileX, tileY, tablets, showTabletDialog, showLanding, debugMode]);
 
   // Load tablets for visible chunks
   useEffect(() => {
@@ -843,7 +835,13 @@ const App: React.FC = () => {
               
               {/* Hidden textarea for input handling */}
               <textarea
-                ref={(el) => el && el.focus()}
+                ref={(el) => {
+                  if (el) {
+                    // Focus and set cursor to end
+                    el.focus();
+                    el.setSelectionRange(el.value.length, el.value.length);
+                  }
+                }}
                 value={tabletContent}
                 onChange={(e) => {
                   const newValue = e.target.value;
@@ -890,7 +888,9 @@ const App: React.FC = () => {
                   fontFamily: 'inherit',
                   fontSize: 'inherit',
                   lineHeight: 'inherit',
-                  pointerEvents: 'none',
+                  pointerEvents: 'auto',
+                  color: 'transparent',
+                  caretColor: 'transparent',
                 }}
               />
             </div>
