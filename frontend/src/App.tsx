@@ -176,6 +176,9 @@ const App: React.FC = () => {
 
   const [cache, setCache] = useState<ChunkCache>({});
   const lastMoveTime = useRef<number>(0);
+  const [tabletCooldown, setTabletCooldown] = useState<Set<string>>(new Set()); // Track recently closed tablets
+  const [showConfirmDialog, setShowConfirmDialog] = useState(false);
+  const [confirmText, setConfirmText] = useState('');
 
   // Create session when app starts
   useEffect(() => {
@@ -189,6 +192,11 @@ const App: React.FC = () => {
   // Movement with delay and API calls
   const movePlayer = useCallback((newX: number, newY: number) => {
     const now = Date.now();
+    
+    // Disable movement when tablet dialog is open
+    if (showTabletDialog) {
+      return;
+    }
     
     // Skip delay in debug mode
     if (!debugMode && (now - lastMoveTime.current < MOVEMENT_DELAY || !canMove)) {
@@ -212,7 +220,58 @@ const App: React.FC = () => {
     
     // Re-enable movement after delay (or immediately in debug mode)
     setTimeout(() => setCanMove(true), debugMode ? 50 : MOVEMENT_DELAY);
-  }, [session, canMove, debugMode]);
+  }, [session, canMove, debugMode, showTabletDialog]);
+
+  // Handle writing to tablet
+  const handleWriteToTablet = async () => {
+    if (!session?.session_id || !currentTablet) return;
+    
+    const newContent = tabletContent.slice(currentTablet.content.length);
+    if (newContent.length === 0) return;
+    
+    const success = await writeToTablet(currentTablet.id, newContent, session.session_id);
+    if (success) {
+      // Update the current tablet content
+      setCurrentTablet({...currentTablet, content: tabletContent});
+      // Refresh tablets cache
+      const [chunkX, chunkY] = chunkCoords(tileX, tileY);
+      const chunkKey = `${chunkX},${chunkY}`;
+      const updatedTablets = await getChunkTablets(chunkX, chunkY);
+      setTablets(prev => new Map(prev).set(chunkKey, updatedTablets));
+      // Update session (chalk points should be updated by the API)
+      if (session.session_id) {
+        updatePlayerPosition(session.session_id, tileX, tileY).then(updatedSession => {
+          if (updatedSession) {
+            setSession(updatedSession);
+          }
+        });
+      }
+      closeTabletDialog();
+    } else {
+      alert('Failed to write to tablet. Check your chalk points.');
+    }
+  };
+
+  // Close tablet dialog with cooldown
+  const closeTabletDialog = () => {
+    if (currentTablet) {
+      const tabletKey = `${currentTablet.id}-${tileX}-${tileY}`;
+      setTabletCooldown(prev => new Set(prev).add(tabletKey));
+      // Remove from cooldown after 2 seconds
+      setTimeout(() => {
+        setTabletCooldown(prev => {
+          const newSet = new Set(prev);
+          newSet.delete(tabletKey);
+          return newSet;
+        });
+      }, 2000);
+    }
+    setShowTabletDialog(false);
+    setCurrentTablet(null);
+    setTabletContent('');
+    setShowConfirmDialog(false);
+    setConfirmText('');
+  };
 
   // Check for tablet at current position
   useEffect(() => {
@@ -234,12 +293,17 @@ const App: React.FC = () => {
     const tabletAtPosition = chunkTablets.find((t: Tablet) => t.local_x === localX && t.local_y === localY);
     
     if (tabletAtPosition && !showTabletDialog) {
-      console.log('Found tablet at position:', tabletAtPosition);
-      setCurrentTablet(tabletAtPosition);
-      setTabletContent(tabletAtPosition.content);
-      setShowTabletDialog(true);
+      const tabletKey = `${tabletAtPosition.id}-${tileX}-${tileY}`;
+      // Check if tablet is on cooldown
+      if (!tabletCooldown.has(tabletKey)) {
+        console.log('Found tablet at position:', tabletAtPosition);
+        setCurrentTablet(tabletAtPosition);
+        // Initialize content with existing tablet content
+        setTabletContent(tabletAtPosition.content || '');
+        setShowTabletDialog(true);
+      }
     }
-  }, [tileX, tileY, tablets, showTabletDialog, showLanding, debugMode]);
+  }, [tileX, tileY, tablets, showTabletDialog, showLanding, debugMode, tabletCooldown]);
 
   // Load tablets for visible chunks
   useEffect(() => {
@@ -605,6 +669,14 @@ const App: React.FC = () => {
   // Main render - normal game or landing page
   return (
     <div style={{ position: 'relative', width: '100vw', height: '100vh', overflow: 'hidden' }}>
+      {/* CSS for blinking cursor */}
+      <style>{`
+        @keyframes blink {
+          0%, 50% { opacity: 1; }
+          51%, 100% { opacity: 0; }
+        }
+      `}</style>
+      
       {/* Maze layer - identical rendering for both modes */}
       <pre style={{
         lineHeight: 1,
@@ -632,6 +704,12 @@ const App: React.FC = () => {
           marginBottom: '2rem',
           textShadow: '0 0 20px #0f0',
           letterSpacing: '0.1em',
+          textAlign: 'center',
+          position: 'relative',
+          // Create selective transparency around text
+          background: 'radial-gradient(ellipse at center, rgba(0,0,0,0.3) 20%, rgba(0,0,0,0.9) 70%)',
+          padding: '1rem 2rem',
+          borderRadius: '12px',
         }}>
           THE ROOMS OF<br />ROAMING
         </div>
@@ -649,6 +727,8 @@ const App: React.FC = () => {
             textTransform: 'uppercase',
             letterSpacing: '0.1em',
             transition: 'all 0.3s ease',
+            margin: '0 auto',
+            display: 'block',
           }}
           onMouseEnter={(e) => {
             e.target.style.backgroundColor = '#0f0';
@@ -693,14 +773,12 @@ const App: React.FC = () => {
         </div>
       )}
 
-      {/* Tablet Dialog */}
-      <Dialog isOpen={showTabletDialog} onClose={() => {
-        setShowTabletDialog(false);
-        setCurrentTablet(null);
-      }}>
+      {/* Tablet Dialog - Unified Editor View */}
+      <Dialog isOpen={showTabletDialog} onClose={closeTabletDialog}>
         {currentTablet && (
           <div style={{
-            maxWidth: '600px',
+            maxWidth: '800px',
+            minWidth: '600px',
             color: '#0f0',
             fontFamily: "'Courier New', 'Lucida Console', monospace",
           }}>
@@ -714,87 +792,121 @@ const App: React.FC = () => {
               ◊ STONE TABLET ◊
             </div>
             
+            {/* Chalk Points Display */}
             <div style={{
+              marginBottom: '1rem',
+              padding: '0.5rem',
               border: '1px solid #0f0',
+              backgroundColor: 'rgba(0,15,0,0.1)',
+              borderRadius: '4px',
+              fontSize: '14px',
+            }}>
+              <div>◊ Chalk Points: <strong>{session?.chalk_points || 0}</strong></div>
+              <div>Characters to add: <strong>{Math.max(0, tabletContent.length - currentTablet.content.length)}</strong></div>
+              <div>Chalk cost: <strong>{Math.max(0, tabletContent.length - currentTablet.content.length)}</strong></div>
+              <div>Remaining after: <strong>{Math.max(0, (session?.chalk_points || 0) - Math.max(0, tabletContent.length - currentTablet.content.length))}</strong></div>
+            </div>
+            
+            {/* Unified Editor */}
+            <div style={{
+              border: '2px solid #0f0',
               padding: '1rem',
               marginBottom: '1rem',
-              backgroundColor: 'rgba(0,15,0,0.1)',
-              minHeight: '200px',
-              whiteSpace: 'pre-wrap',
+              backgroundColor: 'rgba(0,15,0,0.05)',
+              minHeight: '300px',
               fontFamily: 'monospace',
-              fontSize: '14px',
+              fontSize: '16px',
               lineHeight: '1.4',
+              position: 'relative',
             }}>
-              {currentTablet.content || '[ Empty tablet - be the first to write something ]'}
-            </div>
-
-            <div style={{ marginBottom: '1rem' }}>
-              <label style={{ display: 'block', marginBottom: '0.5rem' }}>
-                Add your message (costs 1 chalk point per character):
-              </label>
-              <textarea
-                value={tabletContent}
-                onChange={(e) => setTabletContent(e.target.value)}
-                style={{
-                  width: '100%',
-                  height: '100px',
-                  backgroundColor: 'rgba(0,0,0,0.8)',
-                  border: '1px solid #0f0',
-                  color: '#0f0',
-                  fontFamily: 'monospace',
-                  fontSize: '14px',
-                  padding: '8px',
-                  resize: 'vertical',
-                }}
-                placeholder="Write your message here..."
-              />
-              <div style={{ 
-                fontSize: '12px', 
-                marginTop: '0.5rem',
-                color: session && session.chalk_points >= (tabletContent.length - currentTablet.content.length) ? '#0f0' : '#f00'
-              }}>
-                Characters to add: {Math.max(0, tabletContent.length - currentTablet.content.length)} | 
-                Chalk needed: {Math.max(0, tabletContent.length - currentTablet.content.length)} | 
-                You have: {session?.chalk_points || 0}
+              {/* Render text with highlighting */}
+              <div style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                {/* Original content */}
+                <span style={{ color: '#0f0' }}>
+                  {currentTablet.content}
+                </span>
+                {/* New content highlighted */}
+                <span style={{ color: '#ff0', backgroundColor: 'rgba(255,255,0,0.2)' }}>
+                  {tabletContent.slice(currentTablet.content.length)}
+                </span>
+                {/* Cursor */}
+                <span style={{
+                  display: 'inline-block',
+                  width: '2px',
+                  height: '20px',
+                  backgroundColor: '#0f0',
+                  animation: 'blink 1s infinite',
+                  marginLeft: '1px'
+                }}>
+                </span>
               </div>
+              
+              {/* Hidden textarea for input handling */}
+              <textarea
+                ref={(el) => el && el.focus()}
+                value={tabletContent}
+                onChange={(e) => {
+                  const newValue = e.target.value;
+                  // Don't allow going below original content
+                  if (newValue.length < currentTablet.content.length) {
+                    return;
+                  }
+                  // Don't allow adding more than available chalk
+                  const newChars = newValue.length - currentTablet.content.length;
+                  if (newChars > (session?.chalk_points || 0)) {
+                    return;
+                  }
+                  setTabletContent(newValue);
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    const newContent = tabletContent.slice(currentTablet.content.length);
+                    if (newContent.length > 0) {
+                      // Show in-game confirmation dialog
+                      setConfirmText(newContent);
+                      setShowConfirmDialog(true);
+                    }
+                  } else if (e.key === 'Backspace') {
+                    // Only allow backspace if we're in the new content area
+                    if (tabletContent.length <= currentTablet.content.length) {
+                      e.preventDefault();
+                    }
+                  } else if (e.key === 'Escape') {
+                    closeTabletDialog();
+                  }
+                }}
+                style={{
+                  position: 'absolute',
+                  top: 0,
+                  left: 0,
+                  width: '100%',
+                  height: '100%',
+                  opacity: 0,
+                  background: 'transparent',
+                  border: 'none',
+                  outline: 'none',
+                  resize: 'none',
+                  fontFamily: 'inherit',
+                  fontSize: 'inherit',
+                  lineHeight: 'inherit',
+                  pointerEvents: 'none',
+                }}
+              />
             </div>
 
             <div style={{ display: 'flex', gap: '1rem', justifyContent: 'center' }}>
               <button
-                onClick={async () => {
-                  if (!session?.session_id || !currentTablet) return;
-                  
+                onClick={() => {
                   const newContent = tabletContent.slice(currentTablet.content.length);
-                  if (newContent.length === 0) {
-                    setShowTabletDialog(false);
-                    setCurrentTablet(null);
-                    return;
-                  }
-                  
-                  const success = await writeToTablet(currentTablet.id, newContent, session.session_id);
-                  if (success) {
-                    // Update the current tablet content
-                    setCurrentTablet({...currentTablet, content: tabletContent});
-                    // Refresh tablets cache
-                    const [chunkX, chunkY] = chunkCoords(tileX, tileY);
-                    const chunkKey = `${chunkX},${chunkY}`;
-                    const updatedTablets = await getChunkTablets(chunkX, chunkY);
-                    setTablets(prev => new Map(prev).set(chunkKey, updatedTablets));
-                    // Update session (chalk points should be updated by the API)
-                    if (session.session_id) {
-                      updatePlayerPosition(session.session_id, tileX, tileY).then(updatedSession => {
-                        if (updatedSession) {
-                          setSession(updatedSession);
-                        }
-                      });
-                    }
-                    setShowTabletDialog(false);
-                    setCurrentTablet(null);
+                  if (newContent.length > 0) {
+                    setConfirmText(newContent);
+                    setShowConfirmDialog(true);
                   } else {
-                    alert('Failed to write to tablet. Check your chalk points.');
+                    closeTabletDialog();
                   }
                 }}
-                disabled={!session || (tabletContent.length - currentTablet.content.length) > (session.chalk_points || 0) || tabletContent.length <= currentTablet.content.length}
+                disabled={!session || (tabletContent.length - currentTablet.content.length) > (session.chalk_points || 0)}
                 style={{
                   padding: '0.75rem 1.5rem',
                   backgroundColor: 'transparent',
@@ -803,32 +915,106 @@ const App: React.FC = () => {
                   fontFamily: "'Courier New', 'Lucida Console', monospace",
                   cursor: 'pointer',
                   fontSize: '14px',
-                  opacity: (!session || (tabletContent.length - currentTablet.content.length) > (session.chalk_points || 0) || tabletContent.length <= currentTablet.content.length) ? 0.5 : 1,
+                  opacity: (!session || (tabletContent.length - currentTablet.content.length) > (session.chalk_points || 0)) ? 0.5 : 1,
                 }}
               >
-                Write to Tablet
+                {tabletContent.length > currentTablet.content.length ? 'Confirm Changes' : 'Close'}
               </button>
               
               <button
-                onClick={() => {
-                  setShowTabletDialog(false);
-                  setCurrentTablet(null);
-                }}
+                onClick={closeTabletDialog}
                 style={{
                   padding: '0.75rem 1.5rem',
                   backgroundColor: 'transparent',
-                  border: '2px solid #0f0',
-                  color: '#0f0',
+                  border: '2px solid #f00',
+                  color: '#f00',
                   fontFamily: "'Courier New', 'Lucida Console', monospace",
                   cursor: 'pointer',
                   fontSize: '14px',
                 }}
               >
-                Close (ESC)
+                Cancel (ESC)
               </button>
             </div>
           </div>
         )}
+      </Dialog>
+
+      {/* Confirmation Dialog */}
+      <Dialog isOpen={showConfirmDialog} onClose={() => setShowConfirmDialog(false)}>
+        <div style={{
+          color: '#0f0',
+          fontFamily: "'Courier New', 'Lucida Console', monospace",
+          textAlign: 'center',
+        }}>
+          <div style={{
+            fontSize: '1.2rem',
+            fontWeight: 'bold',
+            marginBottom: '1rem',
+          }}>
+            Confirm Tablet Writing
+          </div>
+          
+          <div style={{
+            border: '1px solid #0f0',
+            padding: '1rem',
+            marginBottom: '1rem',
+            backgroundColor: 'rgba(0,15,0,0.1)',
+            textAlign: 'left',
+          }}>
+            <div style={{ marginBottom: '0.5rem' }}>
+              <strong>Text to add:</strong>
+            </div>
+            <div style={{
+              backgroundColor: 'rgba(255,255,0,0.2)',
+              padding: '0.5rem',
+              fontFamily: 'monospace',
+              border: '1px solid #ff0',
+              whiteSpace: 'pre-wrap',
+            }}>
+              "{confirmText}"
+            </div>
+          </div>
+          
+          <div style={{ marginBottom: '1rem', fontSize: '14px' }}>
+            <div>Chalk cost: <strong>{confirmText.length}</strong></div>
+            <div>You have: <strong>{session?.chalk_points || 0}</strong></div>
+            <div>Remaining: <strong>{(session?.chalk_points || 0) - confirmText.length}</strong></div>
+          </div>
+          
+          <div style={{ display: 'flex', gap: '1rem', justifyContent: 'center' }}>
+            <button
+              onClick={() => {
+                setShowConfirmDialog(false);
+                handleWriteToTablet();
+              }}
+              style={{
+                padding: '0.75rem 1.5rem',
+                backgroundColor: 'transparent',
+                border: '2px solid #0f0',
+                color: '#0f0',
+                fontFamily: "'Courier New', 'Lucida Console', monospace",
+                cursor: 'pointer',
+              }}
+            >
+              Write to Tablet
+            </button>
+            
+            <button
+              onClick={() => setShowConfirmDialog(false)}
+              style={{
+                padding: '0.75rem 1.5rem',
+                backgroundColor: 'transparent',
+                border: '2px solid #f00',
+                color: '#f00',
+                fontFamily: "'Courier New', 'Lucida Console', monospace",
+                cursor: 'pointer',
+              }}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
       </Dialog>
     </div>
   );
